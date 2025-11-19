@@ -166,18 +166,20 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
     client_id = keys["client_id"]
     client_secret = keys["client_secret"]
 
-    # prepare token request (client authentication: client_secret_basic)
+    # prepare token request using client_secret_post (client_id & client_secret in body)
     data = {
         "code": code,
         "redirect_uri": get_redirect_uri(provider),
         "grant_type": "authorization_code",
-        # include client_id in body as some token endpoints require it even with Basic auth
         "client_id": client_id,
+        "client_secret": client_secret,
     }
 
-    auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+    # include PKCE verifier if present in the form (common with modern clients)
+    if code_verifier := frappe.form_dict.get("code_verifier"):
+        data["code_verifier"] = code_verifier
+
     headers = {
-        "Authorization": f"Basic {auth_header}",
         "Accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
     }
@@ -187,19 +189,26 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
     try:
         resp.raise_for_status()
     except Exception:
-        # Log response body to help debug provider errors (e.g. invalid_request details)
-        frappe.log_error(resp.text, "OAuth Token Error")
+        # extract concise error message to avoid oversized Error Log subjects
+        try:
+            body = resp.json()
+            err = body.get("error_description") or body.get("error") or json.dumps(body)
+        except Exception:
+            err = (resp.text or repr(resp)).strip()
+        short_err = (err[:1000] + "...") if len(err) > 1000 else err
+        frappe.log_error(short_err, f"OAuth Token Error ({provider})")
+        frappe.logger().error("OAuth token endpoint response: %s", resp.text)
         raise
 
     try:
         token_response = resp.json()
     except ValueError:
-        # fallback if response isn't JSON
         token_response = json.loads(resp.text)
 
     if id_token:
         token = token_response.get("id_token")
-        info = jwt.decode(token, client_secret, options={"verify_signature": False})
+        # do not verify signature here — caller may verify separately if needed
+        info = jwt.decode(token, options={"verify_signature": False})
 
     else:
         access_token = token_response.get("access_token")
