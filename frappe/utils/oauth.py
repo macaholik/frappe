@@ -171,14 +171,26 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
         "code": code,
         "redirect_uri": get_redirect_uri(provider),
         "grant_type": "authorization_code",
+        # include client_id in body as some token endpoints require it even with Basic auth
+        "client_id": client_id,
     }
 
     auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
-    headers = {"Authorization": f"Basic {auth_header}", "Accept": "application/json"}
+    headers = {
+        "Authorization": f"Basic {auth_header}",
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
 
     # Exchange code for tokens
-    resp = requests.post(token_url, data=data, headers=headers)
-    resp.raise_for_status()
+    resp = requests.post(token_url, data=data, headers=headers, timeout=10)
+    try:
+        resp.raise_for_status()
+    except Exception:
+        # Log response body to help debug provider errors (e.g. invalid_request details)
+        frappe.log_error(resp.text, "OAuth Token Error")
+        raise
+
     try:
         token_response = resp.json()
     except ValueError:
@@ -201,7 +213,7 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
 
         # call provider API with Bearer token
         api_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-        session_resp = requests.get(api_endpoint, params=api_endpoint_args, headers=api_headers)
+        session_resp = requests.get(api_endpoint, params=api_endpoint_args, headers=api_headers, timeout=10)
         session_resp.raise_for_status()
         info = session_resp.json()
 
@@ -211,7 +223,7 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
             if emails_endpoint.startswith("/"):
                 base_url = oauth2_providers[provider]["flow_params"].get("base_url") or ""
                 emails_endpoint = base_url + emails_endpoint
-            emails_resp = requests.get(emails_endpoint, params=api_endpoint_args, headers=api_headers)
+            emails_resp = requests.get(emails_endpoint, params=api_endpoint_args, headers=api_headers, timeout=10)
             emails_resp.raise_for_status()
             emails = emails_resp.json()
             email_dict = next(filter(lambda x: x.get("primary"), emails), None)
