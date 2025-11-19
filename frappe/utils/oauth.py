@@ -155,38 +155,68 @@ def login_via_oauth2_id_token(provider: str, code: str, state: str, decoder: Cal
 
 
 def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None, id_token: bool = False):
-	import jwt
+    import jwt
+    import requests
 
-	flow = get_oauth2_flow(provider)
-	oauth2_providers = get_oauth2_providers()
+    oauth2_providers = get_oauth2_providers()
 
-	args = {
-		"data": {
-			"code": code,
-			"redirect_uri": get_redirect_uri(provider),
-			"grant_type": "authorization_code",
-		}
-	}
+    # token endpoint and client credentials
+    token_url = oauth2_providers[provider]["flow_params"]["access_token_url"]
+    keys = get_oauth_keys(provider)
+    client_id = keys["client_id"]
+    client_secret = keys["client_secret"]
 
-	if decoder:
-		args["decoder"] = decoder
+    # prepare token request (client authentication: client_secret_basic)
+    data = {
+        "code": code,
+        "redirect_uri": get_redirect_uri(provider),
+        "grant_type": "authorization_code",
+    }
 
-	session = flow.get_auth_session(**args)
+    auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+    headers = {"Authorization": f"Basic {auth_header}", "Accept": "application/json"}
 
-	if id_token:
-		parsed_access = json.loads(session.access_token_response.text)
-		token = parsed_access["id_token"]
-		info = jwt.decode(token, flow.client_secret, options={"verify_signature": False})
+    # Exchange code for tokens
+    resp = requests.post(token_url, data=data, headers=headers)
+    resp.raise_for_status()
+    try:
+        token_response = resp.json()
+    except ValueError:
+        # fallback if response isn't JSON
+        token_response = json.loads(resp.text)
 
-	else:
-		api_endpoint = oauth2_providers[provider].get("api_endpoint")
-		api_endpoint_args = oauth2_providers[provider].get("api_endpoint_args")
-		info = session.get(api_endpoint, params=api_endpoint_args).json()
+    if id_token:
+        token = token_response.get("id_token")
+        info = jwt.decode(token, client_secret, options={"verify_signature": False})
 
-		if provider == "github" and not info.get("email"):
-			emails = session.get("/user/emails", params=api_endpoint_args).json()
-			email_dict = next(filter(lambda x: x.get("primary"), emails))
-			info["email"] = email_dict.get("email")
+    else:
+        access_token = token_response.get("access_token")
+        api_endpoint = oauth2_providers[provider].get("api_endpoint")
+        api_endpoint_args = oauth2_providers[provider].get("api_endpoint_args")
+
+        # if api_endpoint is relative, prefix with provider base_url
+        if api_endpoint and api_endpoint.startswith("/"):
+            base_url = oauth2_providers[provider]["flow_params"].get("base_url") or ""
+            api_endpoint = base_url + api_endpoint
+
+        # call provider API with Bearer token
+        api_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+        session_resp = requests.get(api_endpoint, params=api_endpoint_args, headers=api_headers)
+        session_resp.raise_for_status()
+        info = session_resp.json()
+
+        # github special-case: fetch primary email if not present
+        if provider == "github" and not info.get("email"):
+            emails_endpoint = "/user/emails"
+            if emails_endpoint.startswith("/"):
+                base_url = oauth2_providers[provider]["flow_params"].get("base_url") or ""
+                emails_endpoint = base_url + emails_endpoint
+            emails_resp = requests.get(emails_endpoint, params=api_endpoint_args, headers=api_headers)
+            emails_resp.raise_for_status()
+            emails = emails_resp.json()
+            email_dict = next(filter(lambda x: x.get("primary"), emails), None)
+            if email_dict:
+                info["email"] = email_dict.get("email")
 
 	if not (info.get("email_verified") or get_email(info)):
 		frappe.throw(_("Email not verified with {0}").format(provider.title()))
