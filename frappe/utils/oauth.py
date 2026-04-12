@@ -239,10 +239,10 @@ def get_info_via_oauth(provider: str, code: str, decoder: Callable | None = None
             if email_dict:
                 info["email"] = email_dict.get("email")
 
-	if not (info.get("email_verified") or get_email(info)):
-		frappe.throw(_("Email not verified with {0}").format(provider.title()))
+    if not (info.get("email_verified") or get_email(info)):
+        frappe.throw(_("Email not verified with {0}").format(provider.title()))
 
-	return info
+    return info
 
 
 def login_oauth_user(
